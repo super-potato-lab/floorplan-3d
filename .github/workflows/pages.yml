@@ -20,11 +20,7 @@ jobs:
       - name: Run regression tests
         run: node --test tests/*.test.cjs
       - name: Prepare public site
-        run: |
-          mkdir -p _site
-          cp index.html _site/index.html
-          cp -R planner _site/planner
-          touch _site/.nojekyll
+        run: node scripts/build.mjs
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: _site
