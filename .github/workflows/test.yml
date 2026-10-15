@@ -1,0 +1,16 @@
+name: P0 regression tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Run dependency-free Node.js tests
+        run: node --test tests/*.test.cjs

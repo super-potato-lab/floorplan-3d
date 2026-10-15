@@ -18,7 +18,7 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);overflow:hi
   -webkit-text-size-adjust:100%;-webkit-tap-highlight-color:transparent;
   font:13px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
 button,input,select{font:inherit;color:inherit}
-.app{display:grid;grid-template-rows:auto minmax(0,1fr) 30px;grid-template-columns:236px minmax(0,1fr) 300px;height:100vh;height:100dvh;
+.app{display:grid;grid-template-rows:auto minmax(0,1fr) minmax(30px,auto);grid-template-columns:236px minmax(0,1fr) 300px;height:100vh;height:100dvh;
   padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   -webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 input{-webkit-user-select:text;user-select:text}
@@ -70,10 +70,14 @@ main{position:relative;overflow:hidden;background:var(--paper)}
 .modehint{position:absolute;left:50%;top:12px;transform:translateX(-50%);background:var(--ink);color:#fff;
   padding:5px 12px;border-radius:20px;font-size:12px;opacity:0;transition:opacity .2s;pointer-events:none}
 .modehint.show{opacity:.9}
-footer{grid-column:1/-1;display:flex;gap:18px;align-items:center;padding:0 14px;background:var(--panel);overflow:hidden;white-space:nowrap;
+footer{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:4px 18px;align-items:center;padding:4px 14px;background:var(--panel);overflow:hidden;white-space:nowrap;
   border-top:1px solid var(--line);color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
 #tip{overflow:hidden;text-overflow:ellipsis}
 footer b{color:var(--ink);font-weight:500}
+#saveNotice{display:flex;align-items:center;gap:6px;max-width:100%;flex-wrap:wrap;white-space:normal}
+#saveStatus[data-status="error"],#saveStatus[data-status="recovery"]{color:#a62f22;font-weight:600}
+#saveNotice .btn{font-size:11px;padding:2px 6px}
+#saveNotice [hidden]{display:none}
 #panel section{padding:12px 16px;border-bottom:1px solid var(--line)}
 #panel h3{margin:0 0 8px;font-size:13px}
 #panel h3 small{color:var(--muted);font-weight:400;margin-left:6px}
@@ -337,6 +341,10 @@ main.drawer-panel #fab{opacity:0;visibility:hidden}
     <span class="only2d"><span data-en="Scale">当前比例</span> <b id="ratio">—</b></span>
     <span id="hover" class="only2d"></span>
     <span class="spacer"></span>
+    <span id="saveNotice"><span id="saveStatus" role="status" aria-live="polite"></span>
+      <button class="btn" id="retrySave" hidden data-en="Retry save">重试保存</button>
+      <button class="btn" id="saveExport" hidden data-en="Export backup">导出备份</button>
+      <button class="btn" id="exportRecovery" hidden data-en="Export original">导出原始数据</button></span>
     <span id="tip"></span>
   </footer>
 </div>
@@ -538,19 +546,73 @@ function defaultFurniture(){ return [
 
 function defaultState(){
   const rooms = {}; ROOMS.forEach(r => rooms[r.id] = {name:r.name, mat:r.mat});
-  return {furniture:defaultFurniture(), rooms, demolished:[], measures:[]};
+  return {schemaVersion:1, furniture:defaultFurniture(), rooms, demolished:[], measures:[]};
 }
 
 const STORE = 'huxing-design-v1';
+const RECOVERY_STORE = STORE + '-recovery';
+const PLAN_LIMITS = {bytes:2*1024*1024, furniture:500, measures:1000, dimension:20000, coordinate:1000000};
+let storageStatus = 'new', recoveryRaw = null;
 function load(){
-  try { const s = JSON.parse(localStorage.getItem(STORE)); if (s && Array.isArray(s.furniture)) return fixState(s); } catch(e) {}
-  return null;
+  let raw;
+  try { raw = localStorage.getItem(STORE); }
+  catch(e){ storageStatus = 'error'; return null; }
+  if (raw === null) return null;
+  try { const plan = parsePlan(raw); storageStatus = 'saved'; return plan; }
+  catch(e){ recoveryRaw = raw; storageStatus = 'recovery'; return null; }
 }
+// Treat files and cached data as untrusted. Return a new, whitelisted object.
+// Missing top-level collections are supported for older exports; supplied records must be complete.
 function fixState(s){
-  const d = defaultState();
-  s.rooms = Object.assign(d.rooms, s.rooms || {});
-  s.demolished = s.demolished || []; s.measures = s.measures || [];
-  return s;
+  const record = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const own = (o,k) => Object.prototype.hasOwnProperty.call(o,k);
+  const fail = field => { throw new Error(tr('无效的方案字段：', 'Invalid plan field: ') + field); };
+  const number = (v,min,max,field) => { if (typeof v !== 'number' || !Number.isFinite(v) || v < min || v > max) fail(field); return v; };
+  const name = (v,field) => { if (typeof v !== 'string' || !v.trim() || v.length > 200) fail(field); return v; };
+  const list = (v,max,field) => { if (!Array.isArray(v) || v.length > max) fail(field); return v; };
+  if (!record(s)) fail('plan');
+  if (own(s,'schemaVersion') && s.schemaVersion !== 1) fail('schemaVersion');
+  const types = new Set(LIB.flatMap(c => c.items.map(i => i[0]))), ids = new Set();
+  const furniture = list(s.furniture, PLAN_LIMITS.furniture, 'furniture').map(f => {
+    if (!record(f) || typeof f.id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(f.id) || ids.has(f.id)) fail('furniture.id');
+    ids.add(f.id);
+    if (!types.has(f.type)) fail('furniture.type');
+    if (typeof f.color !== 'string' || !/^#[0-9a-f]{3}(?:[0-9a-f]{3})?$/i.test(f.color)) fail('furniture.color');
+    const rot = number(f.rot,-360000,360000,'furniture.rot');
+    return {id:f.id, type:f.type, name:name(f.name,'furniture.name'),
+      cx:number(f.cx,-PLAN_LIMITS.coordinate,PLAN_LIMITS.coordinate,'furniture.cx'),
+      cy:number(f.cy,-PLAN_LIMITS.coordinate,PLAN_LIMITS.coordinate,'furniture.cy'),
+      w:number(f.w,50,PLAN_LIMITS.dimension,'furniture.w'), d:number(f.d,50,PLAN_LIMITS.dimension,'furniture.d'),
+      rot:((rot % 360) + 360) % 360, color:f.color};
+  });
+  const rooms = Object.fromEntries(ROOMS.map(r => [r.id,{name:r.name,mat:r.mat}]));
+  if (own(s,'rooms')){
+    if (!record(s.rooms)) fail('rooms');
+    for (const [id,r] of Object.entries(s.rooms)){
+      if (!own(rooms,id) || !record(r) || typeof r.mat !== 'string' || !own(MATS,r.mat)) fail('rooms.'+id);
+      rooms[id] = {name:name(r.name,'rooms.'+id+'.name'), mat:r.mat};
+    }
+  }
+  const demolished = list(own(s,'demolished') ? s.demolished : [], WALLS.length, 'demolished').map(id => {
+    if (typeof id !== 'string' || !/^w(?:0|[1-9][0-9]*)$/.test(id)) fail('demolished');
+    const wall = WALLS[Number(id.slice(1))];
+    if (!wall || !['n','low'].includes(wall[4])) fail('demolished');
+    return id;
+  });
+  const point = p => {
+    if (!record(p)) fail('measures.point');
+    return {x:number(p.x,-PLAN_LIMITS.coordinate,PLAN_LIMITS.coordinate,'measures.x'),
+      y:number(p.y,-PLAN_LIMITS.coordinate,PLAN_LIMITS.coordinate,'measures.y')};
+  };
+  const measures = list(own(s,'measures') ? s.measures : [], PLAN_LIMITS.measures, 'measures').map(m => {
+    if (!record(m)) fail('measures');
+    return {a:point(m.a),b:point(m.b)};
+  });
+  return {schemaVersion:1, furniture, rooms, demolished:[...new Set(demolished)], measures};
+}
+function parsePlan(text){
+  if (typeof text !== 'string' || text.length > PLAN_LIMITS.bytes) throw new Error(tr('方案文件过大（最多 2 MB）', 'Plan is too large (maximum 2 MB)'));
+  return fixState(JSON.parse(text));
 }
 
 const PX_MM = 25.4 / 96;                       // 1 CSS px = 0.2646 mm
@@ -569,7 +631,26 @@ const ui = {tool:'select', sel:null, mA:null, mCur:null,
 let view = {x0:0, y0:0, s:.06};
 const undoStack = [], redoStack = [];
 
-function save(){ try { localStorage.setItem(STORE, JSON.stringify(state)); } catch(e) {} }
+function renderSaveStatus(){
+  const el = $('#saveStatus');
+  const messages = {
+    new:tr('尚未保存', 'Not saved yet'), saved:tr('已保存到本机', 'Saved on this device'),
+    error:tr('保存不可用或失败，请重试或导出备份', 'Storage unavailable or save failed; retry or export a backup'),
+    recovery:tr('本地方案无效，已显示默认方案；原始数据已保留', 'Invalid local plan; showing defaults; original data retained')
+  };
+  el.textContent = messages[storageStatus]; el.dataset.status = storageStatus;
+  $('#retrySave').hidden = storageStatus !== 'error' && storageStatus !== 'recovery';
+  $('#saveExport').hidden = storageStatus !== 'error' && storageStatus !== 'recovery';
+  $('#exportRecovery').hidden = recoveryRaw === null;
+}
+function save(){
+  try {
+    // Back up invalid cached data before overwriting it. If backup fails, keep the original.
+    if (recoveryRaw !== null) localStorage.setItem(RECOVERY_STORE, recoveryRaw);
+    localStorage.setItem(STORE, JSON.stringify(state));
+    recoveryRaw = null; storageStatus = 'saved'; renderSaveStatus(); return true;
+  } catch(e){ storageStatus = 'error'; renderSaveStatus(); return false; }
+}
 const snap = () => JSON.stringify(state);
 function commit(before){ undoStack.push(before); if (undoStack.length > 150) undoStack.shift(); redoStack.length = 0; save(); }
 function mutate(fn){ const b = snap(); fn(); commit(b); renderAll(); }
@@ -740,7 +821,7 @@ function renderFurn(){
     const fs = Math.max(80, Math.min(170, Math.min(f.w,f.d)*.2));
     const label = Math.min(f.w,f.d) >= 380 && !NOLABEL.includes(f.type)
       ? `<text transform="rotate(${-f.rot})" font-size="${fs}" text-anchor="middle" dominant-baseline="central" fill="#4a443c" opacity=".8" pointer-events="none">${esc(nm(f.name))}</text>` : '';
-    return `<g class="furn" data-fid="${f.id}" transform="translate(${f.cx} ${f.cy}) rotate(${f.rot})">${furnSVG(f.type,f.w,f.d,f.color)}${label}</g>`;
+    return `<g class="furn" data-fid="${esc(f.id)}" transform="translate(${f.cx} ${f.cy}) rotate(${f.rot})">${furnSVG(f.type,f.w,f.d,f.color)}${label}</g>`;
   }).join('');
 }
 
@@ -864,6 +945,7 @@ function renderSel(){
 function renderAll(){
   renderGrid(); renderRooms(); renderFurn(); renderWalls(); renderLabels(); renderMeasure(); renderSel(); renderPanel(); updateHeader();
   window.View3D?.sync();
+  renderSaveStatus();
 }
 
 function updateHeader(){
@@ -999,7 +1081,7 @@ function roomPanel(r){
   const st = state.rooms[r.id], a = area(r.poly), [x0,y0,x1,y1] = bbox(r.poly), inside = state.furniture.filter(f => f.cx>x0&&f.cx<x1&&f.cy>y0&&f.cy<y1);
   const mats = Object.entries(MATS).map(([k,m]) => `<button class="mat ${k===st.mat?'on':''}" data-mat="${k}"><i style="background:${m.sw}"></i><span>${nm(m.name)}<small>¥${m.price}/m²</small></span></button>`).join('');
   return `<section><h3>${tr('房间','Room')}</h3>
-    <div class="form"><label class="full">${tr('名称','Name')}<input id="rName" value="${esc(nm(st.name))}"></label></div>
+    <div class="form"><label class="full">${tr('名称','Name')}<input id="rName" maxlength="200" value="${esc(nm(st.name))}"></label></div>
     <div class="stats" style="margin-top:10px">
       <div><small>${tr('使用面积','Floor area')}</small><span class="big">${fmt(a)}</span> m²</div>
       <div><small>${tr('周长','Perimeter')}</small><span class="big">${fmt(perim(r.poly),1)}</span> m</div>
@@ -1009,7 +1091,7 @@ function roomPanel(r){
   <section><h3>${tr('地面材料','Flooring')}</h3><div class="mats">${mats}</div>
     <div class="total"><span>${tr('材料估价','Estimated cost')}</span><b>¥${Math.round(a*MATS[st.mat].price*1.05).toLocaleString()}</b></div></section>
   <section><h3>${tr('房间内家具','Furniture in room')} <small>${tr(`${inside.length} 件`, `${inside.length} items`)}</small></h3>
-    <table>${inside.map(f => `<tr class="click" data-fid="${f.id}"><td>${esc(nm(f.name))}</td><td class="r muted">${f.w}×${f.d}</td></tr>`).join('') || `<tr><td class="muted">${tr('暂无','None')}</td></tr>`}</table>
+    <table>${inside.map(f => `<tr class="click" data-fid="${esc(f.id)}"><td>${esc(nm(f.name))}</td><td class="r muted">${f.w}×${f.d}</td></tr>`).join('') || `<tr><td class="muted">${tr('暂无','None')}</td></tr>`}</table>
     <div class="actions"><button class="btn" id="back">${tr('← 返回总览','← Back to overview')}</button></div></section>`;
 }
 function bindRoomPanel(){
@@ -1023,7 +1105,7 @@ function bindRoomPanel(){
 function furnPanel(f){
   return `<section><h3>${tr('家具属性','Furniture')}</h3>
     <div class="form">
-      <label class="full">${tr('名称','Name')}<input id="fName" value="${esc(nm(f.name))}"></label>
+      <label class="full">${tr('名称','Name')}<input id="fName" maxlength="200" value="${esc(nm(f.name))}"></label>
       <label>${tr('宽','Width')} (mm)<input type="number" id="fW" value="${f.w}" min="50" step="10"></label>
       <label>${tr('深','Depth')} (mm)<input type="number" id="fD" value="${f.d}" min="50" step="10"></label>
       <label>${tr('中心','Center')} X (mm)<input type="number" id="fX" value="${Math.round(f.cx)}" step="10"></label>
@@ -1041,11 +1123,11 @@ function furnPanel(f){
 }
 function bindFurnPanel(f){
   const upd = (fn) => mutate(() => { const g = getF(f.id); if (g) fn(g); });
-  const num = (id, fn) => $(id).onchange = e => { const v = parseFloat(e.target.value); if (!isNaN(v)) upd(g => fn(g, v)); };
+  const num = (id, fn) => $(id).onchange = e => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) upd(g => fn(g, v)); };
   $('#fName').onchange = e => upd(g => g.name = e.target.value.trim() || g.name);
-  num('#fW', (g,v) => g.w = Math.max(50, Math.round(v)));
-  num('#fD', (g,v) => g.d = Math.max(50, Math.round(v)));
-  num('#fX', (g,v) => g.cx = v); num('#fY', (g,v) => g.cy = v); num('#fR', (g,v) => g.rot = norm(v));
+  num('#fW', (g,v) => g.w = Math.min(PLAN_LIMITS.dimension, Math.max(50, Math.round(v))));
+  num('#fD', (g,v) => g.d = Math.min(PLAN_LIMITS.dimension, Math.max(50, Math.round(v))));
+  num('#fX', (g,v) => g.cx = Math.max(-PLAN_LIMITS.coordinate,Math.min(PLAN_LIMITS.coordinate,v))); num('#fY', (g,v) => g.cy = Math.max(-PLAN_LIMITS.coordinate,Math.min(PLAN_LIMITS.coordinate,v))); num('#fR', (g,v) => g.rot = norm(v));
   $('#fC').onchange = e => upd(g => g.color = e.target.value);
   $('#aRot').onclick = () => rotateSel(90);
   $('#aDup').onclick = duplicateSel;
@@ -1060,6 +1142,7 @@ function select(sel){ ui.sel = sel; renderSel(); renderPanel(); }
 function rotateSel(d){ if (ui.sel?.kind==='furn') mutate(() => { const f = getF(ui.sel.id); f.rot = norm(f.rot + d); }); }
 function deleteSel(){ if (ui.sel?.kind==='furn'){ const id = ui.sel.id; ui.sel = null; mutate(() => state.furniture = state.furniture.filter(f => f.id !== id)); } }
 function duplicateSel(){
+  if (state.furniture.length >= PLAN_LIMITS.furniture) return toast(tr('家具数量已达上限（500 件）', 'Furniture limit reached (500 items)'));
   if (ui.sel?.kind !== 'furn') return;
   const f = getF(ui.sel.id), n = {...f, id:uid(), cx:f.cx+200, cy:f.cy+200};
   ui.sel = {kind:'furn', id:n.id}; mutate(() => state.furniture.push(n));
@@ -1079,6 +1162,7 @@ function pushOut(f){
   }
 }
 function addItem(it, x, y){
+  if (state.furniture.length >= PLAN_LIMITS.furniture) return toast(tr('家具数量已达上限（500 件）', 'Furniture limit reached (500 items)'));
   const [type,name,w,d,color] = it, f = F(type,name,Math.round(x/10)*10,Math.round(y/10)*10,w,d,0,color);
   pushOut(f);
   ui.sel = {kind:'furn', id:f.id};
@@ -1264,7 +1348,7 @@ svg.addEventListener('pointermove', e => {
     const a = f.rot*Math.PI/180, c = Math.cos(a), s = Math.sin(a);
     const dx = p.x-f.cx, dy = p.y-f.cy, lx = dx*c + dy*s, ly = -dx*s + dy*c;
     const ax = -f.w/2, ay = -f.d/2;
-    const nw = Math.max(100, Math.round((lx-ax)/10)*10), nd = Math.max(100, Math.round((ly-ay)/10)*10);
+    const nw = Math.min(PLAN_LIMITS.dimension, Math.max(100, Math.round((lx-ax)/10)*10)), nd = Math.min(PLAN_LIMITS.dimension, Math.max(100, Math.round((ly-ay)/10)*10));
     const mx = ax + nw/2, my = ay + nd/2;
     f.cx += mx*c - my*s; f.cy += mx*s + my*c; f.w = nw; f.d = nd;
   }
@@ -1410,23 +1494,39 @@ let toastT;
 function toast(msg){ const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 1800); }
 
 /* ======================= 2D / 3D 切换 ======================= */
-let viewMode = '2d', switching = false;
+let viewMode = '2d', switching = false, viewRequest = 0;
 const is3D = () => viewMode === '3d';
 const TIPS = () => COARSE
   ? {'2d':tr('点或拖动家具库添加 · 单指拖动平移 · 双指缩放 · 选中家具后底部工具条可旋转 / 复制 / 删除', 'Tap or drag from the library · 1 finger pans · pinch zooms · bottom bar rotates / duplicates / deletes'),
      '3d':tr('单指旋转 · 双指缩放 / 平移 · 点家具或地面编辑 · 点门开关', '1 finger orbits · 2 fingers zoom / pan · tap furniture or floor to edit · tap doors to open')}
   : {'2d':tr('拖动左侧家具到平面图 · 滚轮缩放 · 拖动空白处平移 · T 切换 3D', 'Drag furniture onto the plan · scroll to zoom · drag empty space to pan · T for 3D'),
      '3d':tr('3D 场景与平面方案实时同步 · 右侧面板修改会立即生效 · T 返回 2D', '3D stays in sync with the plan · panel edits apply instantly · T for 2D')};
+function recover3DView(){
+  ++viewRequest;
+  try { window.View3D?.recover(); } catch(e){ console.error('3D cleanup failed', e); }
+  viewMode = '2d'; switching = false;
+  document.body.classList.remove('m3d', 'busy');
+  $('#stage').classList.remove('is3d', 'animating');
+  applyView(); $('#tip').textContent = TIPS()['2d'];
+}
 async function setView(m){
   if (m === viewMode || switching) return;
   if (!window.View3D) return toast(tr('3D 引擎仍在加载或加载失败（需要联网加载 three.js）', '3D engine is still loading or failed to load (three.js needs a network connection)'));
+  const request = ++viewRequest;
   switching = true; document.body.classList.add('busy');
-  viewMode = m;
-  if (m === '3d'){ if (ui.tool !== 'select') setTool('select'); ui.mA = null; document.body.classList.add('m3d'); await window.View3D.enter(); }
-  else { document.body.classList.remove('m3d'); await window.View3D.exit(); applyView(); }
-  $('#tip').textContent = TIPS()[m];
-  switching = false; document.body.classList.remove('busy');
+  try {
+    viewMode = m;
+    if (m === '3d'){ if (ui.tool !== 'select') setTool('select'); ui.mA = null; document.body.classList.add('m3d'); await window.View3D.enter(); }
+    else { document.body.classList.remove('m3d'); await window.View3D.exit(); applyView(); }
+    if (request === viewRequest) $('#tip').textContent = TIPS()[m];
+  } catch(e){
+    if (request === viewRequest){
+      console.error('3D view failed', e); recover3DView();
+      toast(tr('3D 加载或切换失败，已返回 2D；可再次点击 3D 重试', '3D failed; returned to 2D. Click 3D to retry'));
+    }
+  } finally { if (request === viewRequest){ switching = false; document.body.classList.remove('busy'); } }
 }
+
 document.querySelectorAll('.menu-pop .btn').forEach(b => b.addEventListener('click', () => b.closest('details').open = false));
 document.querySelectorAll('#viewSeg .btn').forEach(b => b.onclick = () => setView(b.dataset.view));
 
@@ -1471,16 +1571,45 @@ document.addEventListener('pointerdown', e => { const m = $('details.menu'); if 
 matchMedia('(max-width:1100px)').addEventListener('change', () => drawer(null));
 drawer(null);                                  // 恢复上次的面板收起状态
 $('#exportPng').onclick = exportPNG;
-$('#exportJson').onclick = () => download(tr('户型装修方案', 'floor-plan-design') + '.json', new Blob([JSON.stringify(state, null, 2)], {type:'application/json'}));
+function exportPlan(){ download(tr('户型装修方案', 'floor-plan-design') + '.json', new Blob([JSON.stringify(state, null, 2)], {type:'application/json'})); }
+$('#exportJson').onclick = exportPlan;
+$('#saveExport').onclick = exportPlan;
+$('#retrySave').onclick = () => { if (save()) toast(tr('方案已保存到本机', 'Plan saved on this device')); };
+$('#exportRecovery').onclick = () => {
+  if (recoveryRaw !== null) download('floor-plan-recovery.json', new Blob([recoveryRaw], {type:'application/json'}));
+};
+// Validate and render before committing history or storage. Roll back on rendering errors.
+function importPlan(text){
+  const candidate = parsePlan(text), previous = state, selection = ui.sel, before = snap();
+  state = candidate; ui.sel = null;
+  try { renderAll(); }
+  catch(error){
+    state = previous; ui.sel = selection;
+    try { renderAll(); } catch(e){ recover3DView(); renderAll(); }
+    throw error;
+  }
+  commit(before); updateHeader();
+  return storageStatus === 'saved';
+}
+let importRequest = 0;
+async function importFile(file){
+  const request = ++importRequest;
+  try {
+    if (file.size > PLAN_LIMITS.bytes) throw new Error(tr('方案文件过大（最多 2 MB）', 'Plan is too large (maximum 2 MB)'));
+    const text = await file.text();
+    if (request !== importRequest) return;
+    const saved = importPlan(text);
+    toast(saved ? tr('方案已导入并保存', 'Plan imported and saved') : tr('方案已导入，但保存失败；请导出备份', 'Plan imported, but save failed; export a backup'));
+  } catch(err){
+    if (request === importRequest) toast(tr('导入失败，原方案未更改：', 'Import failed; original plan unchanged: ') + (err instanceof SyntaxError ? tr('JSON 格式错误', 'Invalid JSON') : String(err?.message || tr('无法读取方案', 'Could not read plan')).slice(0,200)));
+  }
+}
 $('#importJson').onclick = () => $('#fileIn').click();
 $('#fileIn').onchange = e => {
-  const file = e.target.files[0]; if (!file) return;
-  file.text().then(txt => {
-    try { const s = JSON.parse(txt); if (!Array.isArray(s.furniture)) throw 0; const b = snap(); state = fixState(s); ui.sel = null; commit(b); renderAll(); toast(tr('方案已导入', 'Plan imported')); }
-    catch(err){ toast(tr('文件格式不正确', 'Invalid file format')); }
-  });
-  e.target.value = '';
+  const file = e.target.files[0]; e.target.value = '';
+  if (file) void importFile(file);
 };
+
 $('#reset').onclick = () => { if (confirm(tr('恢复为默认设计方案？（可撤销）', 'Reset to the default design? (undoable)'))){ const b = snap(); state = defaultState(); ui.sel = null; commit(b); renderAll(); } };
 // 横竖屏切换、表头换行等都会改变画布尺寸；尺寸从 0 恢复（如首次布局）时重新适应窗口
 // 其余尺寸变化（收起 / 展开面板等）保持画面中心不动
@@ -1499,6 +1628,7 @@ function setLang(l){
   $('#tip').textContent = TIPS()[viewMode];
   window.View3D?.relang();
 }
+addEventListener('beforeunload', e => { if (storageStatus === 'error'){ e.preventDefault(); e.returnValue = ''; } });
 $('#langSel').onclick = e => { const l = e.target.closest('[data-lang]')?.dataset.lang; if (l && l !== LANG) setLang(l); };
 
 applyStaticLang(); syncFullscreen();
@@ -1527,6 +1657,8 @@ const SW = () => stage.clientWidth, SH = () => stage.clientHeight;
 const opt = {cut:2.8, furn:true, labels:true, night:false, hour:10, mode:'orbit'};
 
 let inited = false, active = false, raf = 0, anim = null, fly = null;
+let initEvents, resize3D, envTarget, transitionEpoch = 0;
+const listen3D = (el, type, handler, options = {}) => el.addEventListener(type, handler, {...options, signal:initEvents.signal});
 let renderer, labelRenderer, scene, camera, orbit, walkCtl, hemi, sun, ground, glassMat, wallMat, capMat, frameMat;
 let archFloor, archUp, furnG, labelG, lampG, colliders = [], selKey = null, selHelper = null;
 let sigArch = '', sigFurn = '', sigLabels = '', grow = 1, furnGrow = 1;
@@ -1534,7 +1666,8 @@ const doors = [], keys = {};
 
 /* ======================= 初始化 ======================= */
 function init(){
-  if (inited) return; inited = true;
+  if (inited) return;
+  initEvents = new AbortController();
   renderer = new THREE.WebGLRenderer({antialias:true, preserveDrawingBuffer:true});
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   renderer.setSize(SW(), SH());
@@ -1563,7 +1696,9 @@ function init(){
   ground.rotation.x = -Math.PI/2; ground.position.y = -0.015; ground.receiveShadow = true;
   scene.add(hemi, sun, sun.target, ground);
 
-  const pm = new THREE.PMREMGenerator(renderer); envTex = pm.fromScene(new RoomEnvironment(), .04).texture; pm.dispose();
+  const pm = new THREE.PMREMGenerator(renderer), roomEnv = new RoomEnvironment();
+  try { envTarget = pm.fromScene(roomEnv, .04); envTex = envTarget.texture; }
+  finally { roomEnv.dispose?.(); pm.dispose(); }
   glassMat = new THREE.MeshPhysicalMaterial({color:0xcfe6ef, roughness:.05, transparent:true, opacity:.28, depthWrite:false, side:THREE.DoubleSide});
   wallMat = mat('#f4f1eb', {roughness:.92}); capMat = mat('#34312d', {roughness:.9}); frameMat = mat('#5d6166', {roughness:.5, metalness:.4});
 
@@ -1571,27 +1706,27 @@ function init(){
   scene.add(archFloor, archUp, furnG, labelG, lampG);
 
   const cv = renderer.domElement; let downAt = null, look = null;
-  cv.addEventListener('pointerdown', e => {
+  listen3D(cv, 'pointerdown', e => {
     downAt = [e.clientX, e.clientY]; window.closeDrawers();
     if (touchWalk && !look){ look = {id:e.pointerId, x:e.clientX, y:e.clientY}; cv.setPointerCapture(e.pointerId); }
   });
-  cv.addEventListener('pointermove', e => {
+  listen3D(cv, 'pointermove', e => {
     if (!look || e.pointerId !== look.id) return;
     lookBy(e.clientX - look.x, e.clientY - look.y); look.x = e.clientX; look.y = e.clientY;
   });
-  cv.addEventListener('pointercancel', e => { if (look?.id === e.pointerId) look = null; });
+  listen3D(cv, 'pointercancel', e => { if (look?.id === e.pointerId) look = null; });
 
   // 按住已选中的家具拖动：沿地面摆放（与 2D 共用网格和贴墙吸附）。
   // 在父元素上用捕获阶段监听，赶在 OrbitControls 之前关掉它，避免同时旋转镜头
   let fdrag = null;
-  host.addEventListener('pointerdown', e => {
+  listen3D(host, 'pointerdown', e => {
     if (e.target !== cv || !e.isPrimary || anim || opt.mode !== 'orbit' || ui.sel?.kind !== 'furn') return;
     const h = pick(e), f = h?.fid === ui.sel.id && getF(h.fid), g = f && groundAt(e.clientX, e.clientY);
     if (!g) return;
     fdrag = {id:f.id, pid:e.pointerId, sx:e.clientX, sy:e.clientY, ox:g.x - f.cx, oy:g.y - f.cy, before:snap(), moved:false};
     orbit.enabled = false; fly = null; cv.setPointerCapture(e.pointerId);
-  }, true);
-  cv.addEventListener('pointermove', e => {
+  }, {capture:true});
+  listen3D(cv, 'pointermove', e => {
     if (!fdrag || e.pointerId !== fdrag.pid) return;
     if (!fdrag.moved && Math.hypot(e.clientX - fdrag.sx, e.clientY - fdrag.sy) < TAP) return;
     const f = getF(fdrag.id), g = groundAt(e.clientX, e.clientY); if (!f || !g) return;
@@ -1604,9 +1739,9 @@ function init(){
     const d = fdrag; fdrag = null; orbit.enabled = true; cv.style.cursor = '';
     if (d.moved){ commit(d.before); renderAll(); }
   };
-  cv.addEventListener('pointerup', endF); cv.addEventListener('pointercancel', endF);
+  listen3D(cv, 'pointerup', endF); listen3D(cv, 'pointercancel', endF);
 
-  cv.addEventListener('pointerup', e => {
+  listen3D(cv, 'pointerup', e => {
     const tap = downAt && Math.hypot(e.clientX-downAt[0], e.clientY-downAt[1]) <= TAP;
     if (look?.id === e.pointerId){
       look = null;
@@ -1620,11 +1755,11 @@ function init(){
     else if (h?.room) window.select({kind:'room', id:h.room});
     else window.select(null);
   });
-  new ResizeObserver(() => {
+  resize3D = new ResizeObserver(() => {
     renderer.setSize(SW(), SH()); labelRenderer.setSize(SW(), SH());
     camera.aspect = SW()/SH(); camera.updateProjectionMatrix();
-  }).observe(stage);
-  bindUI();
+  }); resize3D.observe(stage);
+  bindUI(); inited = true;
 }
 
 /* ======================= 材质 ======================= */
@@ -2433,7 +2568,7 @@ function camTween(A, B, e){
   camera.position.copy(t).add(new THREE.Vector3().setFromSpherical(s)); camera.lookAt(t); orbit.target.copy(t);
 }
 function setPose(P){ camera.position.copy(P.p); orbit.target.copy(P.t); camera.lookAt(P.t); }
-function animate(dur, fn){ return new Promise(res => { anim = {t0:performance.now(), dur, fn, res}; }); }
+function animate(dur, fn){ return new Promise((res, rej) => { anim = {t0:performance.now(), dur, fn, res, rej}; }); }
 const wait = ms => new Promise(r => setTimeout(r, ms));
 function flyTo(B, dur = 900){ fly = {t0:performance.now(), dur, A:curPose(), B}; }
 function flyToRoom(id){
@@ -2447,6 +2582,7 @@ function flyToRoom(id){
 
 /* ======================= 进入 / 退出 3D ======================= */
 async function enter(){
+  const epoch = ++transitionEpoch;
   init(); active = true;
   renderer.setSize(SW(), SH()); labelRenderer.setSize(SW(), SH()); camera.aspect = SW()/SH(); camera.updateProjectionMatrix();
   sync(true);
@@ -2457,17 +2593,20 @@ async function enter(){
   startLoop(); renderer.render(scene, camera);
   stage.classList.add('is3d');                       // 交叉淡入：此刻 3D 画面与 2D 平面完全重合
   await wait(420);
+  if (epoch !== transitionEpoch) throw new Error('3D transition interrupted');
   await animate(1700, t => {
     camTween(A, B, ease(clamp01(t/.85)));
     grow = ease(clamp01((t - .1)/.55));
     furnGrow = ease(clamp01((t - .45)/.5));
     applyGrow();
   });
+  if (epoch !== transitionEpoch) throw new Error('3D transition interrupted');
   orbit.enabled = true; showLabels(opt.labels);
   stage.classList.remove('animating');
 }
 async function exit(){
-  if (opt.mode === 'walk'){ walkCtl.unlock(); stopTouchWalk(); $('#hint3d').textContent = HINT_ORBIT; $('#walkOverlay').style.display = 'none'; $('#cross').style.display = 'none';
+  const epoch = ++transitionEpoch;
+  if (opt.mode === 'walk'){ walkCtl.unlock(); stopTouchWalk(); $('#hint3d').textContent = HINT_ORBIT(); $('#walkOverlay').style.display = 'none'; $('#cross').style.display = 'none';
     const dir = new THREE.Vector3(); camera.getWorldDirection(dir); orbit.target.copy(camera.position).addScaledVector(dir, 3).setY(0); opt.mode = 'orbit'; syncModeBtns(); }
   fly = null; orbit.enabled = false; showLabels(false); stage.classList.add('animating');
   const A = curPose(), B = planPose();
@@ -2477,11 +2616,35 @@ async function exit(){
     grow = 1 - ease(clamp01((t - .2)/.6));
     applyGrow();
   });
+  if (epoch !== transitionEpoch) throw new Error('3D transition interrupted');
   stage.classList.remove('is3d');                    // 此刻 3D 已压平为正俯视，与 2D 重合后淡出
   await wait(450);
+  if (epoch !== transitionEpoch) throw new Error('3D transition interrupted');
   active = false; cancelAnimationFrame(raf); raf = 0;
   stage.classList.remove('animating');
   grow = furnGrow = 1; applyGrow();
+}
+
+// Return to a retryable state after initialization, rendering or transition failures.
+function recover(){
+  ++transitionEpoch; active = false;
+  cancelAnimationFrame(raf); raf = 0;
+  const pending = anim; anim = fly = null; pending?.rej(new Error('3D transition interrupted'));
+  opt.mode = 'orbit'; walkCtl?.unlock(); stopTouchWalk();
+  Object.keys(keys).forEach(k => delete keys[k]);
+  $('#walkOverlay').style.display = 'none'; $('#cross').style.display = 'none';
+  if (inited){
+    orbit.enabled = true; grow = furnGrow = 1; applyGrow(); showLabels(false); syncModeBtns();
+    sigArch = sigFurn = sigLabels = ''; return;
+  }
+  // Only partial initialization is torn down. A fully initialized scene is rebuilt on retry.
+  initEvents?.abort(); resize3D?.disconnect(); orbit?.dispose(); walkCtl?.dispose();
+  scene?.traverse(o => o.geometry?.dispose());
+  ground?.material.dispose(); glassMat?.dispose();
+  matCache.forEach(m => m.dispose()); matCache.clear(); envTarget?.dispose();
+  renderer?.dispose(); renderer?.domElement.remove(); labelRenderer?.domElement.remove();
+  renderer = labelRenderer = scene = camera = orbit = walkCtl = ground = glassMat = undefined;
+  envTarget = envTex = null;
 }
 
 /* ======================= 选择 / 拾取 ======================= */
@@ -2560,10 +2723,10 @@ function bindJoystick(){
     const L = Math.hypot(dx, dy); if (L > R){ dx *= R/L; dy *= R/L; }
     joy.x = dx/R; joy.y = dy/R; knob.style.transform = `translate(${dx}px,${dy}px)`;
   };
-  el.addEventListener('pointerdown', e => { e.preventDefault(); joy.id = e.pointerId; el.setPointerCapture(e.pointerId); upd(e); });
-  el.addEventListener('pointermove', e => { if (e.pointerId === joy.id) upd(e); });
+  listen3D(el, 'pointerdown', e => { e.preventDefault(); joy.id = e.pointerId; el.setPointerCapture(e.pointerId); upd(e); });
+  listen3D(el, 'pointermove', e => { if (e.pointerId === joy.id) upd(e); });
   const end = e => { if (e.pointerId !== joy.id) return; joy.id = null; joy.x = joy.y = 0; knob.style.transform = ''; };
-  el.addEventListener('pointerup', end); el.addEventListener('pointercancel', end);
+  listen3D(el, 'pointerup', end); listen3D(el, 'pointercancel', end);
 }
 function setMode(m){
   if (anim) return;
@@ -2632,7 +2795,7 @@ function bindUI(){
   document.querySelectorAll('#modes3d .btn').forEach(b => b.onclick = () => setMode(b.dataset.mode));
   // 触屏设备用摇杆漫游；桌面端锁定鼠标，锁定失败时也退回到摇杆
   $('#walkOverlay').onclick = () => COARSE ? startTouchWalk() : walkCtl.lock();
-  document.addEventListener('pointerlockerror', () => { if (active && opt.mode === 'walk') startTouchWalk(); });
+  listen3D(document, 'pointerlockerror', () => { if (active && opt.mode === 'walk') startTouchWalk(); });
   $('#walkExit').onclick = () => setMode('orbit');
   bindJoystick();
   syncWalkTexts();
@@ -2652,6 +2815,7 @@ function bindUI(){
 const clock = new THREE.Clock();
 function startLoop(){ if (!raf){ clock.getDelta(); raf = requestAnimationFrame(loop); } }
 function loop(){
+  try {
   raf = requestAnimationFrame(loop);
   const dt = Math.min(clock.getDelta(), .05), now = performance.now();
   if (anim){ const t = clamp01((now - anim.t0)/anim.dur); anim.fn(t); if (t >= 1){ const r = anim.res; anim = null; r(); } }
@@ -2662,13 +2826,19 @@ function loop(){
   updateSel();
   renderer.render(scene, camera);
   labelRenderer.render(scene, camera);
+  } catch(error){
+    cancelAnimationFrame(raf); raf = 0;
+    if (anim){ const reject = anim.rej; anim = null; reject(error); }
+    else { window.recover3DView(); toast(tr('3D 渲染失败，已返回 2D；可重试', '3D rendering failed; returned to 2D. You can retry')); }
+  }
 }
 
 function shot(){ const a = document.createElement('a'); a.download = tr('户型装修方案', 'floor-plan-design') + '-3D.png'; a.href = renderer.domElement.toDataURL('image/png'); a.click(); }
 
 function relang(){ syncWalkTexts(); if (inited) buildLabels(); }
 
-window.View3D = {enter, exit, relang, sync:() => sync(), shot, groundAt, flyToRoom:id => active && !anim && flyToRoom(id), walking:() => active && opt.mode === 'walk'};
+window.View3D = {enter, exit, recover, relang, sync:() => sync(), shot, groundAt, flyToRoom:id => active && !anim && flyToRoom(id), walking:() => active && opt.mode === 'walk'};
 </script>
 </body>
 </html>
+
