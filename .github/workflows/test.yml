@@ -1,4 +1,4 @@
-name: P0 regression tests
+name: Regression tests
 
 on:
   push:

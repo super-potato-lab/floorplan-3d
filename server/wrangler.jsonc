@@ -1,0 +1,12 @@
+{
+  "name": "floorplan-3d-recognition",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-10-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "ai": {"binding": "AI"},
+  "vars": {"ALLOWED_ORIGIN": "https://super-potato-lab.github.io"},
+  "durable_objects": {"bindings": [{"name": "BUDGET", "class_name": "RecognitionBudget"}]},
+  "migrations": [{"tag": "v1", "new_sqlite_classes": ["RecognitionBudget"]}],
+  "observability": {"enabled": true, "head_sampling_rate": 0.1}
+}

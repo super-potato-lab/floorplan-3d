@@ -87,3 +87,14 @@ Edit this data to use your own floor plan.
 ## License
 
 [MIT](LICENSE)
+
+
+## Universal floor-plan workspace (P1 Beta)
+
+Open [the new workspace](https://super-potato-lab.github.io/floorplan-3d/planner/). Import a PNG/JPEG/WEBP or a selected PDF page, extract wall lines locally or send the compressed image to Cloudflare Workers AI, review the draft, calibrate a known distance, correct walls/openings, then generate 3D. Export v2 JSON to back up the plan and underlay.
+
+The existing example editor and its v1 exports remain separate and unchanged. Local recognition handles dark horizontal/vertical strokes only; manual editing supports arbitrary straight walls. AI recognition is a draft, not a guaranteed reconstruction. Curved walls, multiple floors, perspective correction and automatic furnishing are not supported. Furniture in the universal editor uses editable placeholder boxes.
+
+The public AI trial is capped at 20 requests per UTC day and 100 requests in total, persisted in a SQLite Durable Object, with a 10-second global cooldown. Failed inference counts toward the quota. Local recognition remains available when the quota is exhausted. No API key is exposed. The Worker does not store images or model output; Cloudflare processes the image only when AI recognition is requested.
+
+Run `node --test tests/*.test.cjs`. Tests cover synthetic layouts and validation; they do not establish recognition accuracy on real-world floor plans. Pages deploys the frontend automatically; `server/` is deployed independently to Cloudflare using its checked-in Wrangler configuration.
