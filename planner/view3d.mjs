@@ -4,7 +4,7 @@ import {wallPieces,bounds,distance} from './model.mjs';
 export async function createView(container,onLost){
  let renderer,fallback=false;try{renderer=new THREE.WebGLRenderer({antialias:true,alpha:false});}catch{const {SVGRenderer}=await import('three/addons/renderers/SVGRenderer.js');renderer=new SVGRenderer();renderer.setQuality('high');fallback=true;}renderer.setPixelRatio?.(Math.min(devicePixelRatio,2));renderer.setClearColor(new THREE.Color('#e9ede6'));container.append(renderer.domElement);
  const scene=new THREE.Scene(),camera=new THREE.PerspectiveCamera(45,1,.05,1500),controls=new OrbitControls(camera,renderer.domElement);controls.maxPolarAngle=Math.PI*.49;controls.minDistance=.5;controls.maxDistance=500;
- scene.add(new THREE.HemisphereLight(0xffffff,0x657463,2.4));const sun=new THREE.DirectionalLight(0xfff7e5,2.3);sun.position.set(-10,20,12);scene.add(sun);
+ scene.add(new THREE.HemisphereLight(0xffffff,0x657463,2.4));if(fallback)scene.add(new THREE.AmbientLight(0xffffff,.75));const sun=new THREE.DirectionalLight(0xfff7e5,fallback?1.1:2.3);sun.position.set(-10,20,12);scene.add(sun);
  let group=null,disposed=false,lastBounds=null;
  const render=()=>{if(!disposed&&!container.hidden)renderer.render(scene,camera);};controls.addEventListener('change',render);
  const lose=e=>{e.preventDefault();onLost();};renderer.domElement.addEventListener('webglcontextlost',lose);
@@ -17,6 +17,6 @@ export async function createView(container,onLost){
  for(const f of plan.furniture)box(f.center[0]/1000,f.height/2000,f.center[1]/1000,f.width/1000,f.height/1000,f.depth/1000,-f.rotation*Math.PI/180,furnMat);
  // Dispose unused materials as well as those referenced by meshes on the next update.
  group.userData.materials=[wallMat,sideMat,glassMat,furnMat];
- const b=bounds({...plan,background:null}),cx=(b.minX+b.maxX)/2000,cz=(b.minY+b.maxY)/2000,span=Math.max(4,(b.maxX-b.minX)/1000,(b.maxY-b.minY)/1000);const signature=JSON.stringify(b);if(signature!==lastBounds){controls.target.set(cx,0,cz);camera.position.set(cx+span*.9,span,cz+span*.9);lastBounds=signature;controls.update();}resize();render();}
+ const b=bounds({...plan,background:null}),cx=(b.minX+b.maxX)/2000,cz=(b.minY+b.maxY)/2000,span=Math.max(4,(b.maxX-b.minX)/1000,(b.maxY-b.minY)/1000);const signature=JSON.stringify(b);if(signature!==lastBounds){controls.target.set(cx,1,cz);camera.position.set(cx+span*1.3,span*1.2,cz+span*1.3);lastBounds=signature;controls.update();}resize();render();}
  return{fallback,update,resize,dispose(){if(disposed)return;disposed=true;controls.removeEventListener('change',render);controls.dispose();renderer.domElement.removeEventListener('webglcontextlost',lose);clear();renderer.dispose?.();renderer.domElement.remove();}};
 }
